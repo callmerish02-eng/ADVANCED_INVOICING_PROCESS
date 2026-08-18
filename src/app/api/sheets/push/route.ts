@@ -1,35 +1,72 @@
 /**
  * POST /api/sheets/push
  *
- * Accepts an array of finalized invoice rows (after user review/edit),
- * enriches each with master site data lookups (vendor code, cost center
- * description, FY/Month auto-derived from current date), and appends
- * them as new rows to the MasterData sheet.
+ * Accepts an array of finalized invoice rows (after user review/edit) and:
+ *   1. Fills them into EXISTING empty rows in the MasterData sheet (never
+ *      creates new rows — preserves sheet formulas). Only specific cells
+ *      are written; formulas in other cells remain intact.
+ *   2. Uploads the original invoice file to Google Drive in a
+ *      FY{YYYY-YY}/{Mon}/ folder structure (best-effort — doesn't fail
+ *      the Sheets push if Drive upload fails).
  *
- * All A-fields (autopopulated downstream) are sent as empty strings.
+ * Per user spec, only these cells are written per row:
+ *   A=FY, B=Month (Jan/Feb/...), E=HANA Name, G=Expenses Head,
+ *   H=Expenses Description, J=Vendor Name, K=Invoice No.,
+ *   L=Amount, M=GST, W=Document Type.
+ * All other columns (Legal Entity, Vendor Code, Amount incl GST, etc.)
+ * are left untouched — they're either auto-populated downstream by SAP /
+ * mail / payment systems, or contain formulas.
  */
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/security/session';
 import { writeAudit } from '@/lib/db/repositories';
 import { pushToSheetsSchema } from '@/lib/validation/schemas';
-import { appendInvoiceRows, readSites } from '@/lib/services/sheets';
+import { appendInvoiceRows } from '@/lib/services/sheets';
+import { uploadInvoiceToFolder } from '@/lib/services/drive';
 import { InvoiceRow } from '@/lib/types/invoice';
 
 export const runtime = 'nodejs';
 
 function currentFY(): string {
+  // FY is derived from the invoice date if available, else current date.
+  // Indian fiscal year: April 1 to March 31.
+  // If month is Jan-Mar (1-3), FY is (y-1)-(y)
+  // If month is Apr-Dec (4-12), FY is y-(y+1)
   const now = new Date();
   const y = now.getFullYear();
   const m = now.getMonth() + 1; // 0-indexed
-  // Indian fiscal year: April 1 to March 31
-  // If month is Jan-Mar (1-3), FY is (y-1)-(y)
-  // If month is Apr-Dec (4-12), FY is y-(y+1)
   if (m <= 3) return `${y - 1}-${y}`;
   return `${y}-${y + 1}`;
 }
 
-function currentMonthName(): string {
-  return new Date().toLocaleString('en-US', { month: 'long' });
+function fyFromDate(dateStr: string): string {
+  if (!dateStr) return currentFY();
+  // Accept DD/MM/YYYY or DD-MM-YYYY
+  const m = dateStr.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if (!m) return currentFY();
+  const month = parseInt(m[2], 10);
+  const year = parseInt(m[3], 10);
+  if (month >= 1 && month <= 12) {
+    if (month <= 3) return `${year - 1}-${year}`;
+    return `${year}-${year + 1}`;
+  }
+  return currentFY();
+}
+
+function currentMonthAbbr(): string {
+  return new Date().toLocaleString('en-US', { month: 'short' }); // Jan, Feb, Mar
+}
+
+function monthAbbrFromDate(dateStr: string): string {
+  if (!dateStr) return currentMonthAbbr();
+  const m = dateStr.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+  if (!m) return currentMonthAbbr();
+  const month = parseInt(m[2], 10);
+  if (month >= 1 && month <= 12) {
+    const date = new Date(2000, month - 1, 1);
+    return date.toLocaleString('en-US', { month: 'short' });
+  }
+  return currentMonthAbbr();
 }
 
 export async function POST(req: Request) {
@@ -53,33 +90,36 @@ export async function POST(req: Request) {
     );
   }
 
-  // Load master sites for enrichment (HANA Name → full site record).
-  // Sites now live in the SitesList tab of the same Google Sheet.
-  const sites = await readSites();
-  const siteByHana = new Map(sites.map((s) => [s.hanaName.toLowerCase(), s]));
+  // We no longer look up master sites at push time — the user rolled back
+  // the vendor-code/entity enrichment. We only need the HANA Name from the
+  // invoice row (which the user picked in the dropdown) for column E.
 
   const rows: InvoiceRow[] = parsed.data.rows.map((r) => {
-    const site = siteByHana.get((r.hanaName || '').toLowerCase());
     const amount = parseFloat(r.amount) || 0;
     const gst = parseFloat(r.gst) || 0;
+    // Use invoice date to derive FY + Month (so Drive folder structure
+    // matches the invoice's own date, not the current date)
+    const fy = r.fy || fyFromDate(r.invoiceDate);
+    const month = r.month || monthAbbrFromDate(r.invoiceDate);
 
     return {
-      FY: r.fy || currentFY(),
-      Month: r.month || currentMonthName(),
+      FY: fy,
+      Month: month,
       '4D Print': '',
-      'Legal Entity': site?.entity ?? '',
+      // Legal Entity is left empty per user request — they fill it downstream
+      'Legal Entity': '',
       'Cost Center Description (HANA Name)': r.hanaName,
       'Cost Center Code': '',
       'Expenses Head': r.expensesHead,
       'Expenses Description': r.expensesDescription,
-      // Per user request: write Vendor Code (from master site lookup)
-      // instead of Vendor Name. Vendor Name is left empty.
-      'Vendor Code': site?.vendorCode ?? '',
-      'Vendor Name': '',
+      // Vendor Code is left empty per user request — only Vendor Name is written
+      'Vendor Code': '',
+      'Vendor Name': r.vendorName,
       'Invoice / PO No.': r.invoiceNumber,
       Amount: amount.toFixed(2),
       GST: gst.toFixed(2),
-      'Amount (inclusive of GST)': (amount + gst).toFixed(2),
+      // Leave this empty — the sheet has a formula =L+M in this column
+      'Amount (inclusive of GST)': '',
       'Email address of inputer': '',
       PO: '',
       SES: '',
@@ -102,11 +142,45 @@ export async function POST(req: Request) {
       range: result.updatedRange,
       filledRows: result.filledRows,
     });
+
+    // Upload original invoice files to Google Drive in FY/Month folder structure
+    // (best-effort — don't fail the whole request if Drive upload fails)
+    const driveResults: Array<{ filename: string; ok: boolean; url?: string; error?: string }> = [];
+    for (const r of parsed.data.rows) {
+      if (!r.fileData || !r.filename) {
+        driveResults.push({ filename: r.filename || '(no file)', ok: false, error: 'no file data' });
+        continue;
+      }
+      try {
+        const fy = r.fy || fyFromDate(r.invoiceDate);
+        const month = r.month || monthAbbrFromDate(r.invoiceDate);
+        const driveResult = await uploadInvoiceToFolder({
+          fy,
+          month,
+          filename: r.filename,
+          mimeType: r.mimeType || 'application/octet-stream',
+          base64Data: r.fileData,
+        });
+        driveResults.push({
+          filename: r.filename,
+          ok: true,
+          url: driveResult.fileUrl,
+        });
+      } catch (err) {
+        driveResults.push({
+          filename: r.filename,
+          ok: false,
+          error: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       pushed: result.appendedCount,
       range: result.updatedRange,
       filledRows: result.filledRows,
+      drive: driveResults,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';

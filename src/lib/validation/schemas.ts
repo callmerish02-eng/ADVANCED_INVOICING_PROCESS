@@ -36,6 +36,13 @@ export const invoiceRowSchema = z.object({
   hanaName: z.string().min(1).max(200), // link to master site
   fy: z.string().max(10).optional().default(''),
   month: z.string().max(20).optional().default(''),
+  // Drive upload fields (optional — only set if user wants the file
+  // uploaded to the FY/Month folder structure in Google Drive)
+  invoiceDate: z.string().max(50).optional().default(''),
+  filename: z.string().max(500).optional().default(''),
+  mimeType: z.string().max(100).optional().default(''),
+  // base64-encoded file content (without the data: prefix)
+  fileData: z.string().optional().default(''),
 });
 
 export type InvoiceRowInput = z.infer<typeof invoiceRowSchema>;

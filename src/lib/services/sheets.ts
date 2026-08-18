@@ -98,91 +98,121 @@ async function getSheetsClient(): Promise<sheets_v4.Sheets> {
 // ─── INVOICE DATA (MasterData tab) ─────────────────────────────────────────
 
 /**
- * Write invoice rows to the MasterData tab. Instead of always appending at
- * the end, this looks for the FIRST row (scanning from row 2 downwards)
- * where column E ("Cost Center Description (HANA Name)") is empty, and
- * writes the invoice data there. This lets the user pre-create template
- * rows or fill gaps from deleted entries.
+ * The list of (column-letter, InvoiceRow-field) pairs that we actually write
+ * to. Any column NOT in this list is left untouched — this preserves
+ * formulas in auto-populated columns like "Amount (inclusive of GST)" (=L+M)
+ * and any other downstream formulas the user has set up.
  *
- * If no empty row is found in the existing data, new rows are appended
- * at the end.
+ * Column letters are 1-indexed: A=1, B=2, ..., Y=25.
  *
- * Each invoice row is written independently so different rows can land at
- * different sheet rows (filling scattered gaps).
+ * We only write to:
+ *   A  = FY
+ *   B  = Month
+ *   E  = Cost Center Description (HANA Name)
+ *   G  = Expenses Head
+ *   H  = Expenses Description
+ *   J  = Vendor Name
+ *   K  = Invoice / PO No.
+ *   L  = Amount
+ *   M  = GST
+ *   W  = Document Type
+ */
+const INVOICE_CELL_MAP: ReadonlyArray<{ col: string; field: keyof InvoiceRow }> = [
+  { col: 'A', field: 'FY' },
+  { col: 'B', field: 'Month' },
+  { col: 'E', field: 'Cost Center Description (HANA Name)' },
+  { col: 'G', field: 'Expenses Head' },
+  { col: 'H', field: 'Expenses Description' },
+  { col: 'J', field: 'Vendor Name' },
+  { col: 'K', field: 'Invoice / PO No.' },
+  { col: 'L', field: 'Amount' },
+  { col: 'M', field: 'GST' },
+  { col: 'W', field: 'Document Type' },
+];
+
+/**
+ * Write invoice rows to the MasterData tab by FILLING EXISTING ROWS where
+ * column E is empty. NEVER creates new rows — the sheet has formulas and
+ * pre-formatted rows that must not be disturbed.
+ *
+ * Algorithm:
+ *   1. Read all existing data from MasterData!A2:Y
+ *   2. Find rows where column E is empty BUT the row has data in other
+ *      columns (so we don't fill trailing blank rows)
+ *   3. For each invoice, fill the next available empty row using
+ *      `spreadsheets.values.batchUpdate` with individual cell ranges
+ *      (so formulas in other columns are preserved)
+ *   4. If there aren't enough empty rows, throw an error — the user must
+ *      add more template rows to the sheet first
  */
 export async function appendInvoiceRows(rows: InvoiceRow[]): Promise<{
   appendedCount: number;
   updatedRange?: string;
-  filledRows?: number[]; // sheet row numbers that were written to
+  filledRows?: number[];
 }> {
   if (!SHEET_ID) {
     throw new Error('GOOGLE_SHEET_ID is not set');
   }
   const sheets = await getSheetsClient();
 
-  // Read column E (Cost Center Description / HANA Name) of all existing rows
-  // to find which rows have an empty column E.
-  // Column E = column 5. We read columns A through Y (1-25) for the full width.
+  // Read existing data to find empty rows
   const readResp = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${INVOICE_TAB}!A2:Y`,
   });
   const existing = (readResp.data.values as string[][]) ?? [];
-  // existing[0] corresponds to sheet row 2, existing[1] to row 3, etc.
-  // So sheet row index = existing array index + 2.
 
-  // Find empty row indices (where column E, index 4, is empty/whitespace).
-  // We'll consume these in order from top to bottom.
+  // Find empty row indices (column E empty AND row has SOME data —
+  // we don't want to fill trailing fully-blank rows that the sheet
+  // uses as buffer)
   const emptyRowIndices: number[] = [];
   for (let i = 0; i < existing.length; i++) {
     const row = existing[i] ?? [];
     const colE = (row[4] ?? '').toString().trim(); // index 4 = column E
-    // Also skip rows that are entirely empty (no data in any column) —
-    // those are trailing blank rows we don't want to fill
     const hasAnyData = row.some((c) => (c ?? '').toString().trim() !== '');
     if (!colE && hasAnyData) {
       emptyRowIndices.push(i + 2); // sheet row number (1-indexed, +1 for header)
     }
   }
 
-  // For each invoice row, pick the next empty slot (if available) or
-  // fall back to appending at the end.
-  const lastDataRow = existing.length + 1; // sheet row of last existing data row
-  let nextAppendRow = lastDataRow + 1;
-  const filledRows: number[] = [];
-  let appendedCount = 0;
-
-  for (const row of rows) {
-    const values = [SHEET_COLUMN_ORDER.map((col) => (row[col] ?? '').toString())];
-    let targetRow: number;
-
-    if (emptyRowIndices.length > 0) {
-      // Fill the next empty slot
-      targetRow = emptyRowIndices.shift()!;
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${INVOICE_TAB}!A${targetRow}:Y${targetRow}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values },
-      });
-    } else {
-      // No empty slot — append at the end
-      targetRow = nextAppendRow;
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${INVOICE_TAB}!A${targetRow}:Y${targetRow}`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: { values },
-      });
-      nextAppendRow += 1;
-    }
-    filledRows.push(targetRow);
-    appendedCount += 1;
+  if (emptyRowIndices.length < rows.length) {
+    const needed = rows.length - emptyRowIndices.length;
+    throw new Error(
+      `Not enough empty rows in the MasterData sheet. Need ${rows.length} rows but only ${emptyRowIndices.length} available ` +
+        `(column E empty in existing rows). Please add ${needed} more template row(s) to the sheet first — ` +
+        `the app will not create new rows because the sheet has formulas that must be preserved.`,
+    );
   }
 
+  // For each invoice row, write to the next available empty slot using
+  // batchUpdate with individual cell ranges (preserves formulas in other cells)
+  const filledRows: number[] = [];
+  const allUpdates: sheets_v4.Schema$ValueRange[] = [];
+
+  for (const row of rows) {
+    const targetRow = emptyRowIndices.shift()!;
+    for (const { col, field } of INVOICE_CELL_MAP) {
+      allUpdates.push({
+        range: `${INVOICE_TAB}!${col}${targetRow}`,
+        values: [[(row[field] ?? '').toString()]],
+      });
+    }
+    filledRows.push(targetRow);
+  }
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      valueInputOption: 'USER_ENTERED',
+      data: allUpdates,
+    },
+  });
+
+  const minRow = Math.min(...filledRows);
+  const maxRow = Math.max(...filledRows);
   return {
-    appendedCount,
-    updatedRange: `${INVOICE_TAB}!A${filledRows[0] ?? '?'}:Y${filledRows[filledRows.length - 1] ?? '?'}`,
+    appendedCount: rows.length,
+    updatedRange: `${INVOICE_TAB}!A${minRow}:Y${maxRow}`,
     filledRows,
   };
 }

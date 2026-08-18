@@ -238,18 +238,37 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          rows: rows.map((r) => ({
-            vendorName: r.vendorName,
-            expensesHead: r.expensesHead,
-            expensesDescription: r.expensesDescription,
-            invoiceNumber: r.invoiceNumber,
-            amount: r.amount,
-            gst: r.gst,
-            documentType: r.documentType,
-            hanaName: r.hanaName,
-            fy: '',
-            month: '',
-          })),
+          rows: rows.map((r) => {
+            // Extract base64 file content from data URL (format: data:<mime>;base64,<data>)
+            let fileData = '';
+            let mimeType = r.mimeType;
+            if (r.dataUrl && r.dataUrl.includes(',')) {
+              const idx = r.dataUrl.indexOf(',');
+              fileData = r.dataUrl.slice(idx + 1);
+              // If mimeType wasn't set on the row, derive it from the data URL prefix
+              if (!mimeType) {
+                const match = r.dataUrl.match(/^data:([^;]+);base64/);
+                if (match) mimeType = match[1];
+              }
+            }
+            return {
+              vendorName: r.vendorName,
+              expensesHead: r.expensesHead,
+              expensesDescription: r.expensesDescription,
+              invoiceNumber: r.invoiceNumber,
+              amount: r.amount,
+              gst: r.gst,
+              documentType: r.documentType,
+              hanaName: r.hanaName,
+              fy: '',
+              month: '',
+              // For Drive upload — derived from invoice date on the server
+              invoiceDate: r.invoiceDate,
+              filename: r.filename,
+              mimeType: mimeType || '',
+              fileData,
+            };
+          }),
         }),
       });
       const data = await resp.json();
@@ -261,7 +280,16 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
         filledRows.length > 0
           ? `at sheet row${filledRows.length > 1 ? 's' : ''} ${filledRows.join(', ')}`
           : 'to Google Sheets';
-      toast.success(`Pushed ${data.pushed} invoice(s) ${rowsLabel}`);
+      // Report Drive upload results separately
+      const driveResults = (data.drive as Array<{ filename: string; ok: boolean; url?: string; error?: string }>) ?? [];
+      const driveOk = driveResults.filter((d) => d.ok).length;
+      const driveFail = driveResults.filter((d) => !d.ok).length;
+      let successMsg = `Pushed ${data.pushed} invoice(s) ${rowsLabel}`;
+      if (driveResults.length > 0) {
+        successMsg += ` · Drive: ${driveOk} uploaded`;
+        if (driveFail > 0) successMsg += `, ${driveFail} failed`;
+      }
+      toast.success(successMsg);
       onPushed();
       onClear();
     } catch (err) {

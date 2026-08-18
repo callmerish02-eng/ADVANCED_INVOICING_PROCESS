@@ -11,6 +11,7 @@ export async function GET() {
   );
   const hasEncryption = !!process.env.ENCRYPTION_KEY && process.env.ENCRYPTION_KEY.length === 64;
   const hasJwt = !!process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 32;
+  const hasDriveFolder = !!process.env.DRIVE_ROOT_FOLDER_ID;
 
   // Required for the app to work end-to-end
   const requiredMissing = [
@@ -21,15 +22,17 @@ export async function GET() {
     !hasJwt ? 'JWT_SECRET' : null,
   ].filter(Boolean);
 
-  // Optional — only affects audit log persistence
-  const optionalMissing = [!MONGO_ENABLED ? 'MONGO_URI (optional — audit logs fallback to stdout)' : null].filter(
-    Boolean,
-  );
+  // Optional — only affects audit log persistence + Drive uploads
+  const optionalMissing = [
+    !MONGO_ENABLED ? 'MONGO_URI (optional — audit logs fallback to stdout)' : null,
+    !hasDriveFolder ? 'DRIVE_ROOT_FOLDER_ID (optional — invoice files will only be in Sheets, not Drive)' : null,
+  ].filter(Boolean);
 
   return NextResponse.json({
     status: requiredMissing.length === 0 ? 'ok' : 'degraded',
     services: {
       mongo: MONGO_ENABLED, // optional
+      drive: hasDriveFolder, // optional — uses same service account as Sheets
       gemini: hasGemini,
       sheets: SHEETS_ENABLED,
       auth: hasAdminCreds,
