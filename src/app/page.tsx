@@ -22,6 +22,7 @@ interface MasterSite {
   vendorCode: string;
   region: string;
   state: string;
+  address: string;
 }
 
 interface HealthStatus {

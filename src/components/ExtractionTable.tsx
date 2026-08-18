@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Trash2,
   FileText,
@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import SearchableCombobox from '@/components/ui/combobox';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { EXPENSE_HEADS, DOCUMENT_TYPES } from '@/lib/types/invoice';
@@ -34,6 +35,7 @@ export interface ReviewedRow {
   dataUrl?: string;
   mimeType: string;
   vendorName: string;
+  vendorAddress: string;
   expensesHead: string;
   expensesDescription: string;
   invoiceNumber: string;
@@ -52,6 +54,7 @@ interface MasterSite {
   vendorCode: string;
   region: string;
   state: string;
+  address: string;
 }
 
 interface Props {
@@ -64,21 +67,104 @@ interface Props {
 let _id = 0;
 const nextId = () => `row_${Date.now()}_${++_id}`;
 
+// Common stopwords to ignore when matching addresses
+const STOPWORDS = new Set([
+  'india', 'india.', 'gujarat', 'maharashtra', 'delhi', 'karnataka',
+  'tamil', 'nadu', 'west', 'bengal', 'pradesh', 'rajasthan',
+  'road', 'street', 'ave', 'avenue', 'nagar', 'colony',
+  'estate', 'industrial', 'area', 'sector', 'phase', 'plot',
+  'private', 'limited', 'ltd', 'pvt', 'inc', 'llp', 'the', 'and',
+  'near', 'nr', 'opposite', 'opp', 'behind', 'beside',
+]);
+
+/**
+ * Match an invoice to a MasterSite. Priority:
+ *   1. Address token overlap (vendor address from invoice vs site address)
+ *   2. Vendor name exact match
+ *   3. Vendor name token overlap
+ *   4. Vendor name substring match
+ *
+ * Address matching splits both addresses into tokens (>= 4 chars, excluding
+ * common stopwords like "road", "estate", "private") and counts how many
+ * tokens from the invoice address appear in each site's address. The site
+ * with the highest token overlap wins.
+ */
+function matchSite(
+  invoiceAddress: string,
+  invoiceVendorName: string,
+  sites: MasterSite[],
+): MasterSite | undefined {
+  const addrLower = invoiceAddress.toLowerCase().trim();
+  const vendorLower = invoiceVendorName.toLowerCase().trim();
+
+  // 1. Address-based match
+  if (addrLower) {
+    const tokens = addrLower
+      .split(/[\s,\-]+/)
+      .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
+    if (tokens.length > 0) {
+      const scored = sites
+        .map((s) => {
+          const siteAddr = (s.address || '').toLowerCase();
+          const hits = tokens.filter((t) => siteAddr.includes(t)).length;
+          return { site: s, hits };
+        })
+        .filter((x) => x.hits > 0)
+        .sort((a, b) => b.hits - a.hits);
+      if (scored.length > 0 && scored[0].hits >= 1) {
+        return scored[0].site;
+      }
+    }
+  }
+
+  // 2. Vendor name exact match
+  if (vendorLower) {
+    const exact = sites.find((s) => s.vendorName.toLowerCase().trim() === vendorLower);
+    if (exact) return exact;
+
+    // 3. Vendor name token overlap (at least one significant token)
+    const vendorTokens = vendorLower
+      .split(/\s+/)
+      .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
+    if (vendorTokens.length > 0) {
+      const tokenMatch = sites.find((s) => {
+        const sv = s.vendorName.toLowerCase();
+        return vendorTokens.some((t) => sv.includes(t));
+      });
+      if (tokenMatch) return tokenMatch;
+    }
+
+    // 4. Substring match (either direction)
+    const sub = sites.find(
+      (s) =>
+        s.vendorName.toLowerCase().includes(vendorLower) ||
+        vendorLower.includes(s.vendorName.toLowerCase()),
+    );
+    if (sub) return sub;
+  }
+
+  return undefined;
+}
+
 export default function ExtractionTable({ files, sites, onClear, onPushed }: Props) {
   const [rows, setRows] = useState<ReviewedRow[]>([]);
   const [pushing, setPushing] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
   const [previewIdx, setPreviewIdx] = useState<number | null>(null);
 
-  // Initialize rows when files change
+  // Initialize rows when files change — auto-match HANA Name based on address
   useEffect(() => {
-    setRows(
-      files.map((f) => ({
+    const newRows = files.map((f) => {
+      const vendorName = f.extracted?.vendorName ?? '';
+      const vendorAddress = f.extracted?.vendorAddress ?? '';
+      const match = matchSite(vendorAddress, vendorName, sites);
+      return {
         id: nextId(),
         filename: f.filename,
         dataUrl: f.dataUrl,
         mimeType: f.mimeType,
-        vendorName: f.extracted?.vendorName ?? '',
+        vendorName,
+        vendorAddress,
         expensesHead: f.suggestedExpenseHead ?? 'Other',
         expensesDescription: f.extracted?.expensesDescription ?? '',
         invoiceNumber: f.extracted?.invoiceNumber ?? '',
@@ -86,11 +172,17 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
         gst: f.extracted?.gst ?? '',
         totalAmount: f.extracted?.totalAmount ?? '',
         documentType: f.extracted?.documentType ?? 'Tax Invoice',
-        hanaName: '',
+        hanaName: match?.hanaName ?? '',
         invoiceDate: f.extracted?.invoiceDate ?? '',
-      })),
-    );
-  }, [files]);
+      };
+    });
+    setRows(newRows);
+    // Toast summary of auto-matches
+    const matchedCount = newRows.filter((r) => r.hanaName).length;
+    if (matchedCount > 0) {
+      toast.success(`Auto-matched ${matchedCount} of ${newRows.length} invoice(s) to sites by address`);
+    }
+  }, [files, sites]);
 
   function update(id: string, field: keyof ReviewedRow, value: string) {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
@@ -100,15 +192,11 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
     setRows((prev) => prev.filter((r) => r.id !== id));
   }
 
+  // Re-run the address-based match for a single row (manual button click)
   function autoMatchSite(idx: number) {
     const row = rows[idx];
     if (!row) return;
-    // Try to match by vendor name first
-    const vendorLower = row.vendorName.toLowerCase();
-    const match =
-      sites.find((s) => s.vendorName.toLowerCase() === vendorLower) ||
-      sites.find((s) => vendorLower.includes(s.vendorName.toLowerCase().split(' ')[0])) ||
-      sites.find((s) => s.vendorName.toLowerCase().includes(vendorLower));
+    const match = matchSite(row.vendorAddress, row.vendorName, sites);
     if (match) {
       update(row.id, 'hanaName', match.hanaName);
       toast.success(`Matched site: ${match.hanaName}`);
@@ -116,6 +204,17 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
       toast.info('No matching site found — pick one manually');
     }
   }
+
+  // Build combobox options for HANA Name dropdown (memoized)
+  const siteOptions = useMemo(
+    () =>
+      sites.map((s) => ({
+        value: s.hanaName,
+        label: s.hanaName,
+        hint: `${s.entity} · ${s.vendorName}`,
+      })),
+    [sites],
+  );
 
   async function handlePush() {
     // Validate
@@ -157,7 +256,12 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
       if (!resp.ok) {
         throw new Error(data.error || data.details || 'Push failed');
       }
-      toast.success(`Pushed ${data.pushed} row(s) to Google Sheets`);
+      const filledRows = (data.filledRows as number[] | undefined) ?? [];
+      const rowsLabel =
+        filledRows.length > 0
+          ? `at sheet row${filledRows.length > 1 ? 's' : ''} ${filledRows.join(', ')}`
+          : 'to Google Sheets';
+      toast.success(`Pushed ${data.pushed} invoice(s) ${rowsLabel}`);
       onPushed();
       onClear();
     } catch (err) {
@@ -371,21 +475,15 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
                       Auto-match
                     </button>
                   </div>
-                  <Select
+                  <SearchableCombobox
+                    options={siteOptions}
                     value={row.hanaName}
-                    onValueChange={(v) => update(row.id, 'hanaName', v)}
-                  >
-                    <SelectTrigger className="h-8 text-sm">
-                      <SelectValue placeholder="Select site" />
-                    </SelectTrigger>
-                    <SelectContent className="max-h-72">
-                      {sites.map((s) => (
-                        <SelectItem key={s.hanaName} value={s.hanaName}>
-                          {s.hanaName} · {s.entity} · {s.vendorName}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    onChange={(v) => update(row.id, 'hanaName', v)}
+                    placeholder="Select site"
+                    searchPlaceholder="Search by HANA name, entity, or vendor..."
+                    emptyText="No site found — try a different search term."
+                    buttonClassName="h-8 text-sm"
+                  />
                 </div>
                 <div className="space-y-1 md:col-span-2 lg:col-span-4">
                   <Label className="text-xs">Expense Description</Label>

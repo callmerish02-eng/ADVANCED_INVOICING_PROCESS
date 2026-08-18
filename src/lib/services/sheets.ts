@@ -97,33 +97,93 @@ async function getSheetsClient(): Promise<sheets_v4.Sheets> {
 
 // ─── INVOICE DATA (MasterData tab) ─────────────────────────────────────────
 
+/**
+ * Write invoice rows to the MasterData tab. Instead of always appending at
+ * the end, this looks for the FIRST row (scanning from row 2 downwards)
+ * where column E ("Cost Center Description (HANA Name)") is empty, and
+ * writes the invoice data there. This lets the user pre-create template
+ * rows or fill gaps from deleted entries.
+ *
+ * If no empty row is found in the existing data, new rows are appended
+ * at the end.
+ *
+ * Each invoice row is written independently so different rows can land at
+ * different sheet rows (filling scattered gaps).
+ */
 export async function appendInvoiceRows(rows: InvoiceRow[]): Promise<{
   appendedCount: number;
   updatedRange?: string;
+  filledRows?: number[]; // sheet row numbers that were written to
 }> {
   if (!SHEET_ID) {
     throw new Error('GOOGLE_SHEET_ID is not set');
   }
   const sheets = await getSheetsClient();
 
-  // Build the values matrix in the exact column order expected by the sheet.
-  const values = rows.map((row) =>
-    SHEET_COLUMN_ORDER.map((col) => (row[col] ?? '').toString()),
-  );
-
-  const resp = await sheets.spreadsheets.values.append({
+  // Read column E (Cost Center Description / HANA Name) of all existing rows
+  // to find which rows have an empty column E.
+  // Column E = column 5. We read columns A through Y (1-25) for the full width.
+  const readResp = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${INVOICE_TAB}!A1`,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: {
-      values,
-    },
+    range: `${INVOICE_TAB}!A2:Y`,
   });
+  const existing = (readResp.data.values as string[][]) ?? [];
+  // existing[0] corresponds to sheet row 2, existing[1] to row 3, etc.
+  // So sheet row index = existing array index + 2.
+
+  // Find empty row indices (where column E, index 4, is empty/whitespace).
+  // We'll consume these in order from top to bottom.
+  const emptyRowIndices: number[] = [];
+  for (let i = 0; i < existing.length; i++) {
+    const row = existing[i] ?? [];
+    const colE = (row[4] ?? '').toString().trim(); // index 4 = column E
+    // Also skip rows that are entirely empty (no data in any column) —
+    // those are trailing blank rows we don't want to fill
+    const hasAnyData = row.some((c) => (c ?? '').toString().trim() !== '');
+    if (!colE && hasAnyData) {
+      emptyRowIndices.push(i + 2); // sheet row number (1-indexed, +1 for header)
+    }
+  }
+
+  // For each invoice row, pick the next empty slot (if available) or
+  // fall back to appending at the end.
+  const lastDataRow = existing.length + 1; // sheet row of last existing data row
+  let nextAppendRow = lastDataRow + 1;
+  const filledRows: number[] = [];
+  let appendedCount = 0;
+
+  for (const row of rows) {
+    const values = [SHEET_COLUMN_ORDER.map((col) => (row[col] ?? '').toString())];
+    let targetRow: number;
+
+    if (emptyRowIndices.length > 0) {
+      // Fill the next empty slot
+      targetRow = emptyRowIndices.shift()!;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${INVOICE_TAB}!A${targetRow}:Y${targetRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values },
+      });
+    } else {
+      // No empty slot — append at the end
+      targetRow = nextAppendRow;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${INVOICE_TAB}!A${targetRow}:Y${targetRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values },
+      });
+      nextAppendRow += 1;
+    }
+    filledRows.push(targetRow);
+    appendedCount += 1;
+  }
 
   return {
-    appendedCount: resp.data.updates?.updatedRows ?? rows.length,
-    updatedRange: resp.data.updates?.updatedRange ?? undefined,
+    appendedCount,
+    updatedRange: `${INVOICE_TAB}!A${filledRows[0] ?? '?'}:Y${filledRows[filledRows.length - 1] ?? '?'}`,
+    filledRows,
   };
 }
 

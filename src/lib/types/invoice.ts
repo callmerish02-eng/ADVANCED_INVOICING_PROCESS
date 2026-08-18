@@ -145,7 +145,14 @@ export const EXPENSE_HEADS = [
 
 export type ExpenseHead = (typeof EXPENSE_HEADS)[number];
 
-export const DOCUMENT_TYPES = ['Tax Invoice', 'Bill of Supply', 'Credit Note', 'Debit Note', 'Receipt'] as const;
+export const DOCUMENT_TYPES = [
+  'Tax Invoice',
+  'Proforma Invoice',
+  'Bill of Supply',
+  'Credit Note',
+  'Debit Note',
+  'Receipt',
+] as const;
 
 // ────────────────────────────────────────────────────────────────────────────
 // MASTER SITE DATA — stored in the SitesList tab of the same Google Sheet

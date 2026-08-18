@@ -72,8 +72,10 @@ export async function POST(req: Request) {
       'Cost Center Code': '',
       'Expenses Head': r.expensesHead,
       'Expenses Description': r.expensesDescription,
-      'Vendor Code': '',
-      'Vendor Name': r.vendorName,
+      // Per user request: write Vendor Code (from master site lookup)
+      // instead of Vendor Name. Vendor Name is left empty.
+      'Vendor Code': site?.vendorCode ?? '',
+      'Vendor Name': '',
       'Invoice / PO No.': r.invoiceNumber,
       Amount: amount.toFixed(2),
       GST: gst.toFixed(2),
@@ -98,11 +100,13 @@ export async function POST(req: Request) {
       rowCount: rows.length,
       appendedCount: result.appendedCount,
       range: result.updatedRange,
+      filledRows: result.filledRows,
     });
     return NextResponse.json({
       ok: true,
       pushed: result.appendedCount,
       range: result.updatedRange,
+      filledRows: result.filledRows,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
