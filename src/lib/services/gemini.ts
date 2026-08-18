@@ -9,6 +9,7 @@
  */
 import { GoogleGenAI } from '@google/genai';
 import { z } from 'zod';
+import { jsonrepair } from 'jsonrepair';
 import { EXPENSE_HEADS } from '@/lib/types/invoice';
 
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -107,20 +108,53 @@ export async function extractInvoice({
 
   const text = response.text ?? '';
 
-  // Strip markdown code fences if the model wrapped output in ```json ... ```
-  const cleaned = text
+  // Extract the JSON object from the response — Gemini sometimes wraps it
+  // in markdown code fences or prepends commentary like "Here is the JSON:".
+  // Find the first '{' and the matching last '}' to isolate the JSON body.
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  let jsonStr = text;
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonStr = text.slice(firstBrace, lastBrace + 1);
+  }
+
+  // Strip any markdown code fences that survived the slice
+  jsonStr = jsonStr
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/```\s*$/i, '')
     .trim();
 
   let parsed: unknown;
+  let usedRepair = false;
   try {
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    console.error('[gemini] Failed to parse JSON:', cleaned.slice(0, 500));
-    throw new Error('Gemini returned malformed JSON. Please retry.');
+    parsed = JSON.parse(jsonStr);
+  } catch (originalErr) {
+    // Gemini occasionally returns invalid JSON — most commonly:
+    //   - Literal newlines inside string values (e.g. in `rawText`)
+    //   - Trailing commas
+    //   - Unescaped quotes inside strings
+    // Try repairing with jsonrepair before giving up.
+    try {
+      const repaired = jsonrepair(jsonStr);
+      parsed = JSON.parse(repaired);
+      usedRepair = true;
+      console.info(
+        '[gemini] JSON was malformed (likely unescaped newlines in rawText). Auto-repaired successfully.',
+      );
+    } catch (repairErr) {
+      console.error('[gemini] Failed to parse JSON even after jsonrepair:');
+      console.error('  Original error:', originalErr instanceof Error ? originalErr.message : originalErr);
+      console.error('  Repair error:   ', repairErr instanceof Error ? repairErr.message : repairErr);
+      console.error('  Raw response (first 1000 chars):');
+      console.error(text.slice(0, 1000));
+      throw new Error(
+        'Gemini returned malformed JSON that could not be auto-repaired. Please retry the upload.',
+      );
+    }
   }
+
+  void usedRepair; // for future telemetry
 
   const result = extractionResponseSchema.parse(parsed);
   return result;

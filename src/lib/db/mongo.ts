@@ -14,7 +14,10 @@ const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB_NAME || 'invoice_tracker';
 
 if (!uri) {
-  console.warn('[mongo] MONGO_URI is not set. MongoDB-backed features will be disabled.');
+  // MongoDB is optional — only used for the encrypted audit log.
+  // If not configured, audit entries fall back to stdout (see repositories.ts).
+  // This is an info message, not a warning: it's a perfectly valid config.
+  console.info('[mongo] MONGO_URI not set — audit logs will go to stdout only.');
 }
 
 interface CachedConn {

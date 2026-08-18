@@ -27,14 +27,52 @@ const SA_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
 
 let cachedClient: sheets_v4.Sheets | null = null;
 
-function getServiceAccount(): { client_email: string; private_key: string } | null {
+interface ServiceAccount {
+  type: string;
+  project_id: string;
+  private_key_id: string;
+  private_key: string;
+  client_email: string;
+  client_id: string;
+  auth_uri: string;
+  token_uri: string;
+  auth_provider_x509_cert_url: string;
+  client_x509_cert_url: string;
+}
+
+function getServiceAccount(): ServiceAccount | null {
   if (!SA_JSON) return null;
+
+  let parsed: unknown;
   try {
-    return JSON.parse(SA_JSON);
+    parsed = JSON.parse(SA_JSON);
   } catch (err) {
     console.error('[sheets] GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON:', err);
-    throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_JSON');
+    throw new Error(
+      'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Make sure you pasted the entire key file (minified, with all quotes and braces intact).',
+    );
   }
+
+  const sa = parsed as Partial<ServiceAccount>;
+  if (!sa.client_email || !sa.private_key) {
+    throw new Error(
+      `GOOGLE_SERVICE_ACCOUNT_JSON is missing required fields. Found: ${
+        sa.client_email ? 'client_email OK' : 'client_email MISSING'
+      }, ${sa.private_key ? 'private_key OK' : 'private_key MISSING'}. ` +
+        `Make sure you downloaded a SERVICE ACCOUNT KEY JSON (not an API key, not an OAuth client ID). ` +
+        `See https://developers.google.com/identity/protocols/oauth2/service-account#creatinganaccount for steps.`,
+    );
+  }
+
+  // Sanity-check the private key looks like a PEM (long, contains 'PRIVATE KEY')
+  if (sa.private_key.length < 100 || !sa.private_key.includes('PRIVATE KEY')) {
+    throw new Error(
+      'GOOGLE_SERVICE_ACCOUNT_JSON.private_key does not look like a valid PEM key. ' +
+        'You may have pasted an API key instead of a service account key JSON.',
+    );
+  }
+
+  return sa as ServiceAccount;
 }
 
 async function getSheetsClient(): Promise<sheets_v4.Sheets> {
