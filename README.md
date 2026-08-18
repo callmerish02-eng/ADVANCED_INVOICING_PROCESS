@@ -1,11 +1,12 @@
 # Invoice AI Tracker
 
-Upload invoice PDFs/images → Gemini AI extracts vendor/amount/GST/etc → review → push to the **MasterData** tab of your Google Sheet. Master Site Data (vendor / cost-center master records) lives in the **SitesList** tab of the same spreadsheet and is used for cost-center lookups during the push.
+Upload invoice PDFs/images → Gemini AI extracts vendor/amount/GST/etc → review → push to the **MasterData** tab of your Google Sheet AND upload the original file to Google Drive in a `FY{YYYY-YY}/{Mon}/` folder structure. Master Site Data (vendor / cost-center master records) lives in the **SitesList** tab of the same spreadsheet.
 
 ## Stack
 - **Frontend**: Next.js 16 (App Router) + TypeScript + Tailwind CSS + shadcn/ui
 - **AI**: Google Gemini API (`gemini-2.5-flash-lite`)
 - **Database**: Google Sheets API v4 — `SitesList` tab (Master Site Data) + `MasterData` tab (Master Invoice Data)
+- **File storage**: Google Drive API v3 — original invoice files uploaded to `FY{YYYY-YY}/{Mon}/` folders
 - **Audit log**: MongoDB (optional — falls back to stdout if unreachable)
 - **Auth**: JWT in httpOnly cookies, bcrypt password hash, AES-256-CBC encrypted audit details
 - **Hosting**: Vercel
@@ -34,6 +35,7 @@ Copy `.env.example` → `.env.local` and fill in:
 | `GOOGLE_SHEET_TAB` | yes | Tab name for Master Invoice Data (defaults to `MasterData`) |
 | `SITES_SHEET_TAB` | yes | Tab name for Master Site Data (defaults to `SitesList`) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | yes | Minified JSON of your Google service-account key file |
+| `DRIVE_ROOT_FOLDER_ID` | optional | Google Drive folder ID where invoice files will be uploaded. The folder will be created: `FY{YYYY-YY}/{Mon}/{invoice_file}`. Pre-filled with `1Kpng5Tm6mYA36UkReu7ANtd9026Vh6ph`. **Share this folder with the service account email as Editor.** If unset, invoices are only saved in Sheets (not Drive). |
 
 ### 3. Set up your Google Sheet
 Your spreadsheet must contain TWO tabs:
@@ -90,7 +92,35 @@ Business Area Code, Tax Code, Frequency, Remarks
 `HANA Name` is the lookup key — when seeding a site with an existing HANA Name, the row is updated in place (not duplicated).
 
 ### `MasterData` tab (Master Invoice Data — 25 columns)
-Pushed in the order defined in `SHEET_COLUMN_ORDER`. Fields marked "A" in the user spec are left empty (auto-populated downstream by SAP / mail / payment systems). Fields derived from Master Site Data (`Legal Entity`, `Cost Center Description (HANA Name)`) are populated by looking up the chosen site's `HANA Name` against the `SitesList` tab.
+**The app only writes to existing rows where column E (Cost Center Description / HANA Name) is empty.** It will never create new rows — the sheet has formulas in some columns (e.g. "Amount (inclusive of GST)" = L + M) that must be preserved. If you need more rows, add empty template rows to the sheet first.
+
+When filling a row, the app writes ONLY these cells (using `spreadsheets.values.batchUpdate` with individual cell ranges — formulas in other cells are preserved):
+- `A` = FY (derived from invoice date, e.g. "2026-27")
+- `B` = Month (abbreviated from invoice date, e.g. "Jan", "Feb", "Jul")
+- `E` = Cost Center Description (HANA Name) — the chosen site from the dropdown
+- `G` = Expenses Head
+- `H` = Expenses Description
+- `J` = Vendor Name (from invoice)
+- `K` = Invoice / PO No.
+- `L` = Amount
+- `M` = GST
+- `W` = Document Type
+
+All other columns (`4D Print`, `Legal Entity`, `Cost Center Code`, `Vendor Code`, `Amount (inclusive of GST)`, `Email of inputer`, `PO`, `SES`, `SES Date`, `SES Remarks`, `Mail Status`, `Mail Sent On`, `SIte`, `Payment Date`, `UTR Details`) are left untouched — any formulas or downstream-populated values in them remain intact.
+
+### Google Drive folder structure
+When you click "Push to Sheets", the original invoice file is also uploaded to Google Drive in this structure:
+```
+{DRIVE_ROOT_FOLDER_ID}/
+└── FY2026-27/
+    ├── Apr/
+    │   └── invoice_001.pdf
+    ├── May/
+    │   └── invoice_002.pdf
+    └── Jul/
+        └── Madicare_BMW_Invoice.pdf
+```
+The FY and Month folders are created on demand. If a file with the same name already exists in the target folder, it's overwritten (so re-pushes don't create duplicates). Files are also made readable by anyone with the link.
 
 ## Default credentials (dev)
 - Username: `admin`
