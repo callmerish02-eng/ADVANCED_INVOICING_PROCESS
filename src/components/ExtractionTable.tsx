@@ -158,12 +158,16 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
       const vendorName = f.extracted?.vendorName ?? '';
       const vendorAddress = f.extracted?.vendorAddress ?? '';
       const match = matchSite(vendorAddress, vendorName, sites);
+      // Vendor Name comes from the matched site (SitesList), NOT from the
+      // invoice. If no site matched, vendorName stays empty and the user
+      // must pick a site to populate it.
+      const siteVendorName = match?.vendorName ?? '';
       return {
         id: nextId(),
         filename: f.filename,
         dataUrl: f.dataUrl,
         mimeType: f.mimeType,
-        vendorName,
+        vendorName: siteVendorName,
         vendorAddress,
         expensesHead: f.suggestedExpenseHead ?? 'Other',
         expensesDescription: f.extracted?.expensesDescription ?? '',
@@ -185,20 +189,39 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
   }, [files, sites]);
 
   function update(id: string, field: keyof ReviewedRow, value: string) {
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, [field]: value };
+        // When HANA Name changes, auto-populate Vendor Name from the
+        // matched site. The Vendor Name field is read-only in the UI.
+        if (field === 'hanaName') {
+          const site = sites.find((s) => s.hanaName === value);
+          next.vendorName = site?.vendorName ?? '';
+        }
+        return next;
+      }),
+    );
   }
 
   function remove(id: string) {
     setRows((prev) => prev.filter((r) => r.id !== id));
   }
 
-  // Re-run the address-based match for a single row (manual button click)
+  // Re-run the address-based match for a single row (manual button click).
+  // Also updates vendorName to the matched site's vendor.
   function autoMatchSite(idx: number) {
     const row = rows[idx];
     if (!row) return;
     const match = matchSite(row.vendorAddress, row.vendorName, sites);
     if (match) {
-      update(row.id, 'hanaName', match.hanaName);
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === row.id
+            ? { ...r, hanaName: match.hanaName, vendorName: match.vendorName }
+            : r,
+        ),
+      );
       toast.success(`Matched site: ${match.hanaName}`);
     } else {
       toast.info('No matching site found — pick one manually');
@@ -220,11 +243,13 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
     // Validate
     const errors: string[] = [];
     rows.forEach((r, i) => {
-      if (!r.vendorName) errors.push(`Row ${i + 1}: Vendor name required`);
+      // Vendor name is NOT validated here — it comes from the SitesList
+      // tab at push time via the HANA Name. We only require the HANA Name
+      // to be set (which means a site was picked from the dropdown).
       if (!r.expensesHead) errors.push(`Row ${i + 1}: Expense head required`);
       if (!r.amount || isNaN(Number(r.amount))) errors.push(`Row ${i + 1}: Valid amount required`);
       if (!r.gst || isNaN(Number(r.gst))) errors.push(`Row ${i + 1}: Valid GST required`);
-      if (!r.hanaName) errors.push(`Row ${i + 1}: Site (HANA Name) required`);
+      if (!r.hanaName) errors.push(`Row ${i + 1}: Site (HANA Name) required — pick a site to populate vendor name`);
     });
     if (errors.length > 0) {
       setPushError(errors.slice(0, 5).join('\n'));
@@ -409,11 +434,16 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div className="space-y-1">
-                  <Label className="text-xs">Vendor Name *</Label>
+                  <Label className="text-xs">
+                    Vendor Name
+                    <span className="text-[10px] text-slate-400 ml-1">(from site)</span>
+                  </Label>
                   <Input
                     value={row.vendorName}
-                    onChange={(e) => update(row.id, 'vendorName', e.target.value)}
-                    className="h-8 text-sm"
+                    readOnly
+                    placeholder="— select a site —"
+                    className="h-8 text-sm bg-slate-50 text-slate-600 cursor-not-allowed"
+                    title="Vendor name comes from the SitesList tab — pick a HANA Name to populate this field"
                   />
                 </div>
                 <div className="space-y-1">

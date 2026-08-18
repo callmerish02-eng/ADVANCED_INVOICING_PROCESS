@@ -21,7 +21,7 @@ import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/security/session';
 import { writeAudit } from '@/lib/db/repositories';
 import { pushToSheetsSchema } from '@/lib/validation/schemas';
-import { appendInvoiceRows } from '@/lib/services/sheets';
+import { appendInvoiceRows, readSites } from '@/lib/services/sheets';
 import { uploadInvoiceToFolder } from '@/lib/services/drive';
 import { InvoiceRow } from '@/lib/types/invoice';
 
@@ -90,9 +90,12 @@ export async function POST(req: Request) {
     );
   }
 
-  // We no longer look up master sites at push time — the user rolled back
-  // the vendor-code/entity enrichment. We only need the HANA Name from the
-  // invoice row (which the user picked in the dropdown) for column E.
+  // Look up master sites by HANA Name. The Vendor Name written to the sheet
+  // comes from the SitesList tab (the vendor registered for that site), NOT
+  // from what was extracted from the invoice. This ensures consistency —
+  // the same vendor will always be associated with the same site.
+  const sites = await readSites();
+  const siteByHana = new Map(sites.map((s) => [s.hanaName.toLowerCase(), s]));
 
   const rows: InvoiceRow[] = parsed.data.rows.map((r) => {
     const amount = parseFloat(r.amount) || 0;
@@ -101,6 +104,11 @@ export async function POST(req: Request) {
     // matches the invoice's own date, not the current date)
     const fy = r.fy || fyFromDate(r.invoiceDate);
     const month = r.month || monthAbbrFromDate(r.invoiceDate);
+    // Vendor Name comes from the master site lookup, not the invoice.
+    // If the site doesn't exist in SitesList, we fall back to the invoice's
+    // vendor name (best-effort — but the UI should always have a valid site).
+    const site = siteByHana.get((r.hanaName || '').toLowerCase());
+    const vendorName = site?.vendorName ?? r.vendorName ?? '';
 
     return {
       FY: fy,
@@ -114,7 +122,7 @@ export async function POST(req: Request) {
       'Expenses Description': r.expensesDescription,
       // Vendor Code is left empty per user request — only Vendor Name is written
       'Vendor Code': '',
-      'Vendor Name': r.vendorName,
+      'Vendor Name': vendorName,
       'Invoice / PO No.': r.invoiceNumber,
       Amount: amount.toFixed(2),
       GST: gst.toFixed(2),

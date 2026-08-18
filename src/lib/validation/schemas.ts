@@ -26,7 +26,10 @@ export const extractSchema = z.object({
 });
 
 export const invoiceRowSchema = z.object({
-  vendorName: z.string().min(1).max(200),
+  // Vendor name is OPTIONAL in the request — at push time, the server
+  // looks it up from the SitesList tab using the HANA Name. We still accept
+  // it in the request as a fallback (used when the site isn't found).
+  vendorName: z.string().max(200).optional().default(''),
   expensesHead: z.string().min(1).max(100),
   expensesDescription: z.string().max(2000).optional().default(''),
   invoiceNumber: z.string().max(200).optional().default(''),
