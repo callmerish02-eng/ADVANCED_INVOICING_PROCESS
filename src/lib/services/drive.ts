@@ -14,6 +14,7 @@
  * for the lifetime of the function instance to avoid repeated list calls.
  */
 import { google, drive_v3 } from 'googleapis';
+import { Readable } from 'stream';
 
 const ROOT_FOLDER_ID = process.env.DRIVE_ROOT_FOLDER_ID;
 const SA_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -146,8 +147,11 @@ export async function uploadInvoiceToFolder(args: UploadArgs): Promise<UploadRes
   const monthFolderId = await findOrCreateFolder(fyFolderId, args.month);
 
   // 3. Upload the file inside the Month folder.
-  // Convert base64 to a Node Buffer for the multipart upload.
+  // Convert base64 to a Node.js Readable stream. The googleapis SDK
+  // expects media.body to be a stream (something with .pipe()), not a
+  // raw Buffer — passing a Buffer directly throws "t.body.pipe is not a function".
   const buffer = Buffer.from(args.base64Data, 'base64');
+  const stream = Readable.from(buffer);
 
   // Check if a file with the same name already exists in the month folder.
   // If so, we OVERWRITE it (so re-uploads don't create duplicates).
@@ -166,7 +170,7 @@ export async function uploadInvoiceToFolder(args: UploadArgs): Promise<UploadRes
       fileId,
       media: {
         mimeType: args.mimeType,
-        body: buffer,
+        body: stream,
       },
       fields: 'id',
     });
@@ -179,7 +183,7 @@ export async function uploadInvoiceToFolder(args: UploadArgs): Promise<UploadRes
       },
       media: {
         mimeType: args.mimeType,
-        body: buffer,
+        body: stream,
       },
       fields: 'id',
     });
