@@ -253,7 +253,12 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
   const [duplicates, setDuplicates] = useState<string[] | null>(null);
   const [pendingPush, setPendingPush] = useState(false);
 
-  async function handlePush(force = false) {
+  async function handlePush(force: boolean = false) {
+    // Defensive: if force is anything other than a real boolean (e.g. a
+    // React event object passed by mistake via onClick={handlePush}),
+    // treat it as false. This prevents JSON.stringify from throwing
+    // "cyclic object value" when serializing the request body.
+    const forceFlag = force === true;
     // Validate
     const errors: string[] = [];
     rows.forEach((r, i) => {
@@ -306,7 +311,7 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
               fileData,
             };
           }),
-          force,
+          force: forceFlag,
         }),
       });
       const data = await resp.json();
@@ -396,7 +401,7 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
             <Trash2 className="w-4 h-4 mr-1" /> Clear all
           </Button>
           <Button
-            onClick={handlePush}
+            onClick={() => handlePush()}
             disabled={pushing || rows.length === 0}
             className="bg-emerald-700 hover:bg-emerald-800"
             size="sm"
