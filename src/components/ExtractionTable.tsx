@@ -9,10 +9,21 @@ import {
   Loader2,
   Save,
   AlertCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogAction,
+  AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -239,7 +250,10 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
     [sites],
   );
 
-  async function handlePush() {
+  const [duplicates, setDuplicates] = useState<string[] | null>(null);
+  const [pendingPush, setPendingPush] = useState(false);
+
+  async function handlePush(force = false) {
     // Validate
     const errors: string[] = [];
     rows.forEach((r, i) => {
@@ -270,7 +284,6 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
             if (r.dataUrl && r.dataUrl.includes(',')) {
               const idx = r.dataUrl.indexOf(',');
               fileData = r.dataUrl.slice(idx + 1);
-              // If mimeType wasn't set on the row, derive it from the data URL prefix
               if (!mimeType) {
                 const match = r.dataUrl.match(/^data:([^;]+);base64/);
                 if (match) mimeType = match[1];
@@ -287,34 +300,54 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
               hanaName: r.hanaName,
               fy: '',
               month: '',
-              // For Drive upload — derived from invoice date on the server
               invoiceDate: r.invoiceDate,
               filename: r.filename,
               mimeType: mimeType || '',
               fileData,
             };
           }),
+          force,
         }),
       });
       const data = await resp.json();
+
+      // Handle duplicate-invoice response (409)
+      if (resp.status === 409 && data.error === 'duplicates_found') {
+        setDuplicates(data.duplicates as string[]);
+        setPendingPush(true);
+        return;
+      }
+
       if (!resp.ok) {
         throw new Error(data.error || data.details || 'Push failed');
       }
+
       const filledRows = (data.filledRows as number[] | undefined) ?? [];
       const rowsLabel =
         filledRows.length > 0
           ? `at sheet row${filledRows.length > 1 ? 's' : ''} ${filledRows.join(', ')}`
           : 'to Google Sheets';
-      // Report Drive upload results separately
       const driveResults = (data.drive as Array<{ filename: string; ok: boolean; url?: string; error?: string }>) ?? [];
       const driveOk = driveResults.filter((d) => d.ok).length;
       const driveFail = driveResults.filter((d) => !d.ok).length;
       let successMsg = `Pushed ${data.pushed} invoice(s) ${rowsLabel}`;
       if (driveResults.length > 0) {
         successMsg += ` · Drive: ${driveOk} uploaded`;
-        if (driveFail > 0) successMsg += `, ${driveFail} failed`;
+        if (driveFail > 0) {
+          successMsg += `, ${driveFail} failed`;
+          // Show Drive error details in a separate toast so the user can see WHY
+          const failed = driveResults.filter((d) => !d.ok);
+          setTimeout(() => {
+            toast.error(
+              `Drive upload failures:\n${failed.map((f) => `  • ${f.filename}: ${f.error}`).join('\n')}`,
+              { duration: 8000 },
+            );
+          }, 500);
+        }
       }
       toast.success(successMsg);
+      setDuplicates(null);
+      setPendingPush(false);
       onPushed();
       onClear();
     } catch (err) {
@@ -326,15 +359,31 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
     }
   }
 
+  function dropDuplicates() {
+    if (!duplicates) return;
+    // Remove rows whose invoice number is in the duplicates list
+    const dupSet = new Set(duplicates.map((d) => d.toLowerCase()));
+    setRows((prev) => prev.filter((r) => !dupSet.has(r.invoiceNumber.trim().toLowerCase())));
+    setDuplicates(null);
+    setPendingPush(false);
+    toast.success(`Dropped ${duplicates.length} duplicate invoice(s)`);
+  }
+
+  function proceedAnyway() {
+    setDuplicates(null);
+    setPendingPush(false);
+    handlePush(true);
+  }
+
   if (rows.length === 0) {
     return null;
   }
 
   return (
-    <Card className="border-emerald-100">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="flex items-center gap-2">
-          <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+    <Card className="border-slate-200 rounded-none">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 border-b border-slate-200 bg-slate-50">
+        <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-900">
+          <CheckCircle2 className="w-4 h-4 text-emerald-700" />
           Review & Edit Extracted Data ({rows.length})
         </CardTitle>
         <div className="flex gap-2">
@@ -349,7 +398,7 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
           <Button
             onClick={handlePush}
             disabled={pushing || rows.length === 0}
-            className="bg-emerald-600 hover:bg-emerald-700"
+            className="bg-emerald-700 hover:bg-emerald-800"
             size="sm"
           >
             {pushing ? (
@@ -557,6 +606,51 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
           ))}
         </div>
       </CardContent>
+
+      {/* Duplicate invoice confirmation dialog */}
+      <AlertDialog open={pendingPush && duplicates !== null}>
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-amber-500" />
+              Duplicate Invoice Numbers Found
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  {duplicates?.length} invoice(s) with the same number already exist in the
+                  MasterData sheet:
+                </p>
+                <ul className="text-xs bg-amber-50 border border-amber-200 rounded p-2 max-h-32 overflow-y-auto">
+                  {duplicates?.map((d, i) => (
+                    <li key={i} className="font-mono">• {d}</li>
+                  ))}
+                </ul>
+                <p>Drop these duplicates from your batch, or proceed anyway (this will write
+                  the duplicate invoice numbers to new rows)?</p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => { setPendingPush(false); setDuplicates(null); }}>
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              variant="outline"
+              onClick={dropDuplicates}
+              className="border-amber-400 text-amber-700 hover:bg-amber-50"
+            >
+              Drop Duplicates
+            </Button>
+            <AlertDialogAction
+              onClick={proceedAnyway}
+              className="bg-emerald-700 hover:bg-emerald-800"
+            >
+              Proceed Anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

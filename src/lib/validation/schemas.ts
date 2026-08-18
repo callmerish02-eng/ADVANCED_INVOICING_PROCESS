@@ -52,6 +52,11 @@ export type InvoiceRowInput = z.infer<typeof invoiceRowSchema>;
 
 export const pushToSheetsSchema = z.object({
   rows: z.array(invoiceRowSchema).min(1).max(50),
+  // If true, the push will proceed even if duplicate invoice numbers are
+  // found in the MasterData sheet. If false/missing, the endpoint returns
+  // a 'duplicates_found' response with the list of duplicates instead of
+  // writing anything.
+  force: z.boolean().optional().default(false),
 });
 
 export type PushToSheetsInput = z.infer<typeof pushToSheetsSchema>;

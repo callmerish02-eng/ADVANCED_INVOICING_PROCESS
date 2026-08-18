@@ -113,13 +113,13 @@ export default function UploadPanel({ onExtracted }: Props) {
   );
 
   return (
-    <Card className="border-emerald-100">
+    <Card className="border-slate-200 rounded-none">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <UploadCloud className="w-5 h-5 text-emerald-600" />
+        <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-900">
+          <UploadCloud className="w-4 h-4 text-emerald-700" />
           Upload Invoices
         </CardTitle>
-        <p className="text-sm text-slate-500">
+        <p className="text-xs text-slate-500">
           Drag & drop PDF, PNG, JPEG, or WEBP files (max 10 MB each, up to 20 at a time).
           Gemini AI will extract the data automatically.
         </p>
@@ -138,8 +138,8 @@ export default function UploadPanel({ onExtracted }: Props) {
           }}
           onClick={() => inputRef.current?.click()}
           className={`
-            border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors
-            ${dragOver ? 'border-emerald-500 bg-emerald-50' : 'border-slate-300 hover:border-emerald-400 hover:bg-slate-50'}
+            border-2 border-dashed p-8 text-center cursor-pointer transition-colors
+            ${dragOver ? 'border-emerald-600 bg-emerald-50' : 'border-slate-300 hover:border-emerald-600 hover:bg-slate-50'}
           `}
         >
           <input

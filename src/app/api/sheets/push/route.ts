@@ -23,6 +23,8 @@ import { writeAudit } from '@/lib/db/repositories';
 import { pushToSheetsSchema } from '@/lib/validation/schemas';
 import { appendInvoiceRows, readSites } from '@/lib/services/sheets';
 import { uploadInvoiceToFolder } from '@/lib/services/drive';
+import { getAuthorizedClient } from '@/lib/services/sheets-service-account';
+import { google } from 'googleapis';
 import { InvoiceRow } from '@/lib/types/invoice';
 
 export const runtime = 'nodejs';
@@ -30,13 +32,14 @@ export const runtime = 'nodejs';
 function currentFY(): string {
   // FY is derived from the invoice date if available, else current date.
   // Indian fiscal year: April 1 to March 31.
+  // Format: "YYYY-YY" (e.g. "2026-27", NOT "2026-2027")
   // If month is Jan-Mar (1-3), FY is (y-1)-(y)
   // If month is Apr-Dec (4-12), FY is y-(y+1)
   const now = new Date();
   const y = now.getFullYear();
   const m = now.getMonth() + 1; // 0-indexed
-  if (m <= 3) return `${y - 1}-${y}`;
-  return `${y}-${y + 1}`;
+  if (m <= 3) return `${y - 1}-${String(y).slice(-2)}`;
+  return `${y}-${String(y + 1).slice(-2)}`;
 }
 
 function fyFromDate(dateStr: string): string {
@@ -47,8 +50,8 @@ function fyFromDate(dateStr: string): string {
   const month = parseInt(m[2], 10);
   const year = parseInt(m[3], 10);
   if (month >= 1 && month <= 12) {
-    if (month <= 3) return `${year - 1}-${year}`;
-    return `${year}-${year + 1}`;
+    if (month <= 3) return `${year - 1}-${String(year).slice(-2)}`;
+    return `${year}-${String(year + 1).slice(-2)}`;
   }
   return currentFY();
 }
@@ -88,6 +91,60 @@ export async function POST(req: Request) {
       { error: 'Validation failed', details: parsed.error.flatten() },
       { status: 400 },
     );
+  }
+
+  // ─── Duplicate check ────────────────────────────────────────────────────
+  // Scan existing MasterData rows for invoice numbers that match any of the
+  // rows we're about to push. If duplicates are found AND the request didn't
+  // include `force: true`, return a 'duplicates_found' response so the UI
+  // can ask the user to drop or proceed.
+  const invoiceNumbersToCheck = parsed.data.rows
+    .map((r) => r.invoiceNumber?.trim())
+    .filter(Boolean) as string[];
+
+  if (invoiceNumbersToCheck.length > 0 && !parsed.data.force) {
+    try {
+      const auth = await getAuthorizedClient();
+      const sheetsApi = google.sheets({ version: 'v4', auth });
+      const SHEET_ID = process.env.GOOGLE_SHEET_ID!;
+      const INVOICE_TAB = process.env.GOOGLE_SHEET_TAB || 'MasterData';
+
+      // Read column K (Invoice / PO No.) of all existing rows
+      const resp = await sheetsApi.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${INVOICE_TAB}!K2:K`,
+      });
+      const existingRows = (resp.data.values as string[][]) ?? [];
+
+      const existingSet = new Set<string>();
+      for (const row of existingRows) {
+        const v = (row?.[0] ?? '').toString().trim().toLowerCase();
+        if (v) existingSet.add(v);
+      }
+
+      const duplicates = invoiceNumbersToCheck.filter((inv) =>
+        existingSet.has(inv.toLowerCase()),
+      );
+
+      if (duplicates.length > 0) {
+        await writeAudit('SHEETS_PUSH_DUPLICATE_FOUND', session.sub, {
+          duplicates,
+          rowCount: parsed.data.rows.length,
+        });
+        return NextResponse.json(
+          {
+            error: 'duplicates_found',
+            duplicates,
+            message: `${duplicates.length} invoice(s) with the same number already exist in the sheet. Drop them or proceed anyway?`,
+          },
+          { status: 409 },
+        );
+      }
+    } catch (err) {
+      // If the duplicate check itself fails, log and continue with the push
+      // (best-effort — don't block the user from pushing if the check is broken)
+      console.error('[push] Duplicate check failed:', err);
+    }
   }
 
   // Look up master sites by HANA Name. The Vendor Name written to the sheet
