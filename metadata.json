@@ -1,0 +1,6 @@
+{
+  "name": "Invoice AI Tracker",
+  "description": "Gemini-powered invoice extraction with Google Sheets integration and audit tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
