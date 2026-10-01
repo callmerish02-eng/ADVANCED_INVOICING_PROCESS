@@ -8,3 +8,6 @@ d.text((50, 130), "Amount: 15000.00", fill='black')
 d.text((50, 160), "GST: 2700.00", fill='black')
 img.save('/home/z/my-project/download/test-invoice.png')
 print('saved')
+
+
+

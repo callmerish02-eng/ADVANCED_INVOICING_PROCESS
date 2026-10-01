@@ -53,3 +53,6 @@ console.log('\n--- END ---\n');
 console.log(`Length: ${minified.length} chars`);
 console.log(`client_email: ${sa.client_email}`);
 console.log(`project_id:  ${sa.project_id}`);
+
+
+
