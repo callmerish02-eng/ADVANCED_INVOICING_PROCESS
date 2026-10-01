@@ -1,195 +1,170 @@
-/**
- * Gemini AI extraction service.
- *
- * Uses @google/genai SDK to call the gemini-2.5-flash-lite model with
- * inline_data parts (PDF and image both supported as base64).
- *
- * The model is asked to return strict JSON matching the ExtractedInvoice
- * schema. We then validate with Zod before persisting.
- */
 import { GoogleGenAI } from '@google/genai';
-import { z } from 'zod';
 import { jsonrepair } from 'jsonrepair';
-import { EXPENSE_HEADS } from '@/lib/types/invoice';
+import { ExtractedInvoice } from '@/lib/types/invoice';
 
-const API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
-
-if (!API_KEY) {
-  console.warn('[gemini] GEMINI_API_KEY is not set. Extraction will fail at runtime.');
-}
-
-const extractionResponseSchema = z.object({
-  vendorName: z.string().max(200),
-  vendorAddress: z.string().max(1000).optional().default(''),
-  invoiceNumber: z.string().max(200).optional().default(''),
-  invoiceDate: z.string().max(50).optional().default(''),
-  amount: z.string().optional().default(''),
-  gst: z.string().optional().default(''),
-  totalAmount: z.string().optional().default(''),
-  documentType: z.string().optional().default('Tax Invoice'),
-  expensesDescription: z.string().max(2000).optional().default(''),
-  rawText: z.string().optional().default(''),
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || '',
 });
 
-export type GeminiExtractionResult = z.infer<typeof extractionResponseSchema>;
+export function suggestExpenseHead(description: string, vendorName: string = ''): string {
+  const combined = `${description} ${vendorName}`.toLowerCase();
 
-const SYSTEM_PROMPT = `You are an invoice data extraction assistant for a healthcare company.
-From the provided invoice document (PDF or image), extract the following fields and return them as STRICT JSON.
-
-Rules:
-- All monetary values must be NUMERIC STRINGS without currency symbols (e.g. "15000.00", not "₹15,000").
-- "amount" = base/subtotal amount BEFORE GST.
-- "gst" = the GST/tax amount separately stated on the invoice.
-- "totalAmount" = grand total INCLUDING GST.
-- If a field is not present, return an empty string "".
-- "invoiceDate" must be in DD/MM/YYYY format if visible; otherwise "".
-- "documentType" must be one of: "Tax Invoice", "Bill of Supply", "Credit Note", "Debit Note", "Receipt". Default to "Tax Invoice" if unclear.
-- "expensesDescription" should be a 1-line summary of what the invoice is for (e.g. "Monthly pathology lab rent", "AMC for centrifuge", "Housekeeping services - June 2025").
-- "vendorName" should be the legal name of the supplier as printed on the invoice.
-- DO NOT include any text outside the JSON object. No markdown, no commentary.
-
-Output schema:
-{
-  "vendorName": string,
-  "vendorAddress": string,
-  "invoiceNumber": string,
-  "invoiceDate": string,
-  "amount": string,
-  "gst": string,
-  "totalAmount": string,
-  "documentType": string,
-  "expensesDescription": string,
-  "rawText": string  // first 1500 chars of extracted text from the invoice
-}`;
-
-interface ExtractArgs {
-  mimeType: string;
-  base64Data: string;
-}
-
-export async function extractInvoice({
-  mimeType,
-  base64Data,
-}: ExtractArgs): Promise<GeminiExtractionResult> {
-  if (!API_KEY) {
-    throw new Error('GEMINI_API_KEY is not configured. Set it in the environment.');
+  // Bio-Medical Waste (BMW)
+  if (
+    combined.includes('bmw') ||
+    combined.includes('bio medical') ||
+    combined.includes('biomedical') ||
+    combined.includes('waste') ||
+    combined.includes('incinerat') ||
+    combined.includes('color bags') ||
+    combined.includes('synergy waste') ||
+    combined.includes('maridi') ||
+    combined.includes('ramky') ||
+    combined.includes('pollutech')
+  ) {
+    return 'BMW Bills';
   }
 
-  const ai = new GoogleGenAI({ apiKey: API_KEY });
+  // Barcoding Bills
+  if (
+    combined.includes('barcode') ||
+    combined.includes('bar code') ||
+    combined.includes('barcoding') ||
+    combined.includes('stickers') ||
+    combined.includes('labels') ||
+    combined.includes('thermal transfer') ||
+    combined.includes('ribbon') ||
+    combined.includes('scanner')
+  ) {
+    return 'Barcoding Bills';
+  }
 
-  // The @google/genai SDK accepts inline_data parts directly.
-  // PDFs, PNGs, JPEGs, and WEBPs are all supported by gemini-2.5-flash-lite.
+  if (combined.includes('housekeep') || combined.includes('clean') || combined.includes('pest')) {
+    return 'Housekeeping & Sanitization';
+  }
+  if (combined.includes('securit') || combined.includes('guard')) {
+    return 'Security Services';
+  }
+  if (combined.includes('courier') || combined.includes('logistics') || combined.includes('shipping') || combined.includes('freight')) {
+    return 'Courier & Logistics';
+  }
+  if (combined.includes('rent') || combined.includes('lease')) {
+    return 'Rent & Maintenance';
+  }
+  if (combined.includes('electric') || combined.includes('power') || combined.includes('water bill')) {
+    return 'Electricity & Utilities';
+  }
+  if (combined.includes('amc') || combined.includes('maintenance') || combined.includes('repair')) {
+    return 'Equipment Maintenance / AMC';
+  }
+  if (combined.includes('internet') || combined.includes('broadband') || combined.includes('telecom')) {
+    return 'Internet & Telecom';
+  }
+  if (combined.includes('stationery') || combined.includes('print')) {
+    return 'Printing & Stationery';
+  }
+  if (combined.includes('reagent') || combined.includes('vacutainer') || combined.includes('consumable')) {
+    return 'Diagnostic Consumables';
+  }
+
+  return 'Other';
+}
+
+function cleanAndParseJSON(raw: string): any {
+  let cleaned = raw.trim();
+  cleaned = cleaned.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/i, '').trim();
+
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    cleaned = cleaned.slice(start, end + 1);
+  }
+
+  cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    try {
+      const repaired = jsonrepair(cleaned);
+      return JSON.parse(repaired);
+    } catch {
+      return {
+        vendorName: (cleaned.match(/"vendorName"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        buyerName: (cleaned.match(/"buyerName"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        buyerAddress: (cleaned.match(/"buyerAddress"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        detectedSite: (cleaned.match(/"detectedSite"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        invoiceNumber: (cleaned.match(/"invoiceNumber"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        invoiceDate: (cleaned.match(/"invoiceDate"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        amount: (cleaned.match(/"amount"\s*:\s*"([^"]+)"/) || [])[1] || '0',
+        gst: (cleaned.match(/"gst"\s*:\s*"([^"]+)"/) || [])[1] || '0',
+        totalAmount: (cleaned.match(/"totalAmount"\s*:\s*"([^"]+)"/) || [])[1] || '',
+        documentType: (cleaned.match(/"documentType"\s*:\s*"([^"]+)"/) || [])[1] || 'Tax Invoice',
+        expensesDescription: (cleaned.match(/"expensesDescription"\s*:\s*"([^"]+)"/) || [])[1] || '',
+      };
+    }
+  }
+}
+
+export async function extractInvoice(input: {
+  mimeType: string;
+  base64Data: string;
+}): Promise<ExtractedInvoice> {
+  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+
+  const prompt = `You are an expert Indian finance invoice reader. Analyze this document and extract the structured data in JSON format.
+Distinguish between the SELLER/VENDOR and the BUYER/CUSTOMER/DELIVERY location.
+
+Return ONLY a valid JSON object matching this schema:
+{
+  "vendorName": "Full legal name of the seller / supplier / service provider",
+  "vendorAddress": "Registered address of the seller / supplier",
+  "vendorGstin": "GSTIN of seller if present",
+  "buyerName": "Legal entity billed to (e.g., Tata 1mg Healthcare Solutions, 1MG Technologies, 1MG Labs, etc.)",
+  "buyerAddress": "Billed-to / Shipped-to / Delivery site physical address, including locality, city, state, and 6-digit PIN code",
+  "buyerGstin": "GSTIN of the buyer if present",
+  "detectedSite": "Any site, branch, lab, center or warehouse name mentioned (e.g. MG Road Lab, Sector 62 FC, Indiranagar PAC)",
+  "invoiceNumber": "Invoice number or Bill number",
+  "invoiceDate": "Normalized to DD/MM/YYYY format",
+  "amount": "Base taxable amount in decimal string, excluding GST (e.g. 15000.00)",
+  "gst": "Total GST amount (CGST + SGST or IGST) in decimal string (e.g. 2700.00)",
+  "totalAmount": "Total invoice payable amount in decimal string (e.g. 17700.00)",
+  "documentType": "Choose from: 'Tax Invoice', 'Bill of Supply', 'Credit Note', 'Debit Note', 'Proforma Invoice', 'Delivery Challan', 'Receipt / Cash Voucher'",
+  "expensesDescription": "Clear summary of services or items billed (e.g. 'Bio-Medical Waste management for November', 'Barcode labels 50x25mm 20 rolls')"
+}
+Do not include markdown code fences or explanatory text.`;
+
   const response = await ai.models.generateContent({
-    model: MODEL,
+    model: modelName,
     contents: [
       {
         role: 'user',
         parts: [
-          {
-            inlineData: {
-              mimeType,
-              data: base64Data,
-            },
-          },
-          {
-            text: 'Extract the invoice data and return strict JSON per the system instructions.',
-          },
+          { inlineData: { mimeType: input.mimeType, data: input.base64Data } },
+          { text: prompt },
         ],
       },
     ],
-    config: {
-      systemInstruction: SYSTEM_PROMPT,
-      temperature: 0,
-      topP: 0.1,
-      responseMimeType: 'application/json',
-    },
   });
 
-  const text = response.text ?? '';
+  const text = response.text || '';
+  const parsed = cleanAndParseJSON(text);
 
-  // Extract the JSON object from the response — Gemini sometimes wraps it
-  // in markdown code fences or prepends commentary like "Here is the JSON:".
-  // Find the first '{' and the matching last '}' to isolate the JSON body.
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  let jsonStr = text;
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    jsonStr = text.slice(firstBrace, lastBrace + 1);
-  }
-
-  // Strip any markdown code fences that survived the slice
-  jsonStr = jsonStr
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-    .trim();
-
-  let parsed: unknown;
-  let usedRepair = false;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch (originalErr) {
-    // Gemini occasionally returns invalid JSON — most commonly:
-    //   - Literal newlines inside string values (e.g. in `rawText`)
-    //   - Trailing commas
-    //   - Unescaped quotes inside strings
-    // Try repairing with jsonrepair before giving up.
-    try {
-      const repaired = jsonrepair(jsonStr);
-      parsed = JSON.parse(repaired);
-      usedRepair = true;
-      console.info(
-        '[gemini] JSON was malformed (likely unescaped newlines in rawText). Auto-repaired successfully.',
-      );
-    } catch (repairErr) {
-      console.error('[gemini] Failed to parse JSON even after jsonrepair:');
-      console.error('  Original error:', originalErr instanceof Error ? originalErr.message : originalErr);
-      console.error('  Repair error:   ', repairErr instanceof Error ? repairErr.message : repairErr);
-      console.error('  Raw response (first 1000 chars):');
-      console.error(text.slice(0, 1000));
-      throw new Error(
-        'Gemini returned malformed JSON that could not be auto-repaired. Please retry the upload.',
-      );
-    }
-  }
-
-  void usedRepair; // for future telemetry
-
-  const result = extractionResponseSchema.parse(parsed);
-  return result;
-}
-
-/**
- * Suggest an expense head from the description, mapping common keywords
- * to the predefined EXPENSE_HEADS list. The user can still override.
- */
-export function suggestExpenseHead(description: string): string {
-  const d = description.toLowerCase();
-  const rules: Array<[string[], string]> = [
-    [['rent', 'lease'], 'Rent'],
-    [['electric', 'power', 'light'], 'Electricity'],
-    [['water', 'sewage'], 'Water'],
-    [['internet', 'broadband', 'telecom', 'telephone'], 'Internet & Telecom'],
-    [['housekeep', 'cleaning', 'janitor'], 'Housekeeping'],
-    [['security', 'guard'], 'Security'],
-    [['manpower', 'staffing', 'agency staff'], 'Manpower & Staffing'],
-    [['maintenance', 'repair', 'service'], 'Repairs & Maintenance'],
-    [['amc', 'cmc', 'annual maintenance'], 'AMC / CMC'],
-    [['consumable', 'reagent', 'glove', 'syringe'], 'Consumables'],
-    [['stationery', 'printing', 'paper'], 'Stationery & Printing'],
-    [['travel', 'conveyance', 'cab', 'fuel'], 'Travel & Conveyance'],
-    [['professional', 'consulting', 'fee'], 'Professional Fees'],
-    [['waste', 'biomedical'], 'Waste Management'],
-    [['pantry', 'tea', 'coffee', 'refreshment'], 'Pantry & Refreshments'],
-    [['insurance'], 'Insurance'],
-    [['statutory', 'compliance', 'gst', 'tds'], 'Statutory & Compliance'],
-    [['transport', 'courier', 'logistics'], 'Transportation'],
-  ];
-  for (const [keys, head] of rules) {
-    if (keys.some((k) => d.includes(k))) {
-      return EXPENSE_HEADS.includes(head as never) ? head : 'Other';
-    }
-  }
-  return 'Other';
+  return {
+    vendorName: parsed.vendorName || '',
+    vendorAddress: parsed.vendorAddress || '',
+    vendorGstin: parsed.vendorGstin || '',
+    buyerName: parsed.buyerName || '',
+    buyerAddress: parsed.buyerAddress || '',
+    buyerGstin: parsed.buyerGstin || '',
+    detectedSite: parsed.detectedSite || '',
+    invoiceNumber: parsed.invoiceNumber || '',
+    invoiceDate: parsed.invoiceDate || '',
+    amount: parsed.amount ? String(parsed.amount).replace(/[^0-9.]/g, '') : '0.00',
+    gst: parsed.gst ? String(parsed.gst).replace(/[^0-9.]/g, '') : '0.00',
+    totalAmount: parsed.totalAmount ? String(parsed.totalAmount).replace(/[^0-9.]/g, '') : '',
+    documentType: parsed.documentType || 'Tax Invoice',
+    expensesDescription: parsed.expensesDescription || '',
+    rawText: text,
+  };
 }

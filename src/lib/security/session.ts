@@ -1,41 +1,39 @@
-/**
- * Cookie helpers — only usable inside route handlers and server components
- * (these use next/headers which is not available in middleware).
- */
 import { cookies } from 'next/headers';
-import {
-  signSession,
-  verifySession,
-  SessionPayload,
-  SESSION_COOKIE_NAME,
-} from './jwt';
+import { signToken, verifySession, SESSION_COOKIE_NAME, SessionPayload } from './jwt';
 
-export { signSession, verifySession, SESSION_COOKIE_NAME };
-export type { SessionPayload };
-
-export async function getSessionCookie(): Promise<string | undefined> {
-  const store = await cookies();
-  return store.get(SESSION_COOKIE_NAME)?.value;
+export function signSession(username: string): string {
+  return signToken(username);
 }
 
-export async function getSession(): Promise<SessionPayload | null> {
-  const token = await getSessionCookie();
-  if (!token) return null;
-  return verifySession(token);
-}
-
-export async function setSessionCookie(token: string): Promise<void> {
-  const store = await cookies();
-  store.set(SESSION_COOKIE_NAME, token, {
+export async function setSessionCookie(token: string) {
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'strict',
     path: '/',
-    maxAge: 60 * 60 * 8, // 8 hours
+    maxAge: 8 * 60 * 60,
   });
 }
 
-export async function clearSessionCookie(): Promise<void> {
-  const store = await cookies();
-  store.delete(SESSION_COOKIE_NAME);
+export async function clearSessionCookie() {
+  const cookieStore = await cookies();
+  cookieStore.set(SESSION_COOKIE_NAME, '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/',
+    maxAge: 0,
+  });
+}
+
+export async function getSession(): Promise<SessionPayload | null> {
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+    if (!token) return null;
+    return verifySession(token);
+  } catch {
+    return null;
+  }
 }

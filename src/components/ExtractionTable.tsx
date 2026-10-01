@@ -659,3 +659,6 @@ export default function ExtractionTable({ files, sites, onClear, onPushed }: Pro
     </Card>
   );
 }
+
+
+

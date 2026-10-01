@@ -1,145 +1,33 @@
-/**
- * Type definitions for the Master Invoice Data tracker.
- *
- * Fields marked with "A" in the user's spec are auto-populated by downstream
- * systems (SAP, mail, payment) — we leave them empty when pushing to Sheets.
- * Fields the AI must extract are tagged with EXTRACTED.
- * Fields derived from Master Site Data are tagged with LOOKUP.
- * Fields auto-derived from the current date are tagged with AUTO_DATE.
- */
-
-export interface InvoiceRow {
-  // AUTO_DATE — derived from invoice date or current month
-  FY: string;
-  // AUTO_DATE — derived from invoice date or current month
-  Month: string;
-  // A — autopopulated, leave empty
-  '4D Print': string;
-  // A — autopopulated, leave empty
-  'Legal Entity': string;
-  // LOOKUP — from master site data (HANA Name)
-  'Cost Center Description (HANA Name)': string;
-  // A — autopopulated, leave empty
-  'Cost Center Code': string;
-  // EXTRACTED — categorisation chosen by user (dropdown)
-  'Expenses Head': string;
-  // EXTRACTED — description from the invoice
-  'Expenses Description': string;
-  // A — autopopulated, leave empty (matches vendor name from site data)
-  'Vendor Code': string;
-  // EXTRACTED — vendor name from the invoice
-  'Vendor Name': string;
-  // EXTRACTED (optional)
-  'Invoice / PO No.': string;
-  // EXTRACTED — base amount (excluding GST)
-  Amount: string;
-  // EXTRACTED — GST amount
-  GST: string;
-  // A — autopopulated by downstream (computed: Amount + GST)
-  'Amount (inclusive of GST)': string;
-  // A — autopopulated, leave empty
-  'Email address of inputer': string;
-  // A — autopopulated, leave empty
-  PO: string;
-  // A — autopopulated, leave empty
-  SES: string;
-  // A — autopopulated, leave empty
-  'SES Date': string;
-  // A — autopopulated, leave empty
-  'SES Remarks': string;
-  // A — autopopulated, leave empty
-  'Mail Status': string;
-  // A — autopopulated, leave empty
-  'Mail Sent On': string;
-  // A — autopopulated, leave empty
-  SIte: string;
-  // EXTRACTED with default "Tax Invoice"
-  'Document Type': string;
-  // A — autopopulated, leave empty
-  'Payment Date': string;
-  // A — autopopulated, leave empty
-  'UTR Details': string;
-}
-
-/**
- * The order of columns as they appear in the MasterData sheet.
- * This MUST match the sheet's header row order.
- */
-export const SHEET_COLUMN_ORDER: readonly (keyof InvoiceRow)[] = [
-  'FY',
-  'Month',
-  '4D Print',
-  'Legal Entity',
-  'Cost Center Description (HANA Name)',
-  'Cost Center Code',
-  'Expenses Head',
-  'Expenses Description',
-  'Vendor Code',
-  'Vendor Name',
-  'Invoice / PO No.',
-  'Amount',
-  'GST',
-  'Amount (inclusive of GST)',
-  'Email address of inputer',
-  'PO',
-  'SES',
-  'SES Date',
-  'SES Remarks',
-  'Mail Status',
-  'Mail Sent On',
-  'SIte',
-  'Document Type',
-  'Payment Date',
-  'UTR Details',
-];
-
 export interface ExtractedInvoice {
   vendorName: string;
   vendorAddress?: string;
-  invoiceNumber?: string;
-  invoiceDate?: string;
-  amount: string;
-  gst: string;
-  totalAmount?: string;
+  vendorGstin?: string;
+  buyerName?: string; // Entity or internal billed-to client name (e.g. 1MGH, 1MGT)
+  buyerAddress?: string; // Delivery / Site physical address for matching
+  buyerGstin?: string;
+  detectedSite?: string; // Branch / site / facility name if printed on invoice
+  invoiceNumber: string;
+  invoiceDate: string; // Normalized to DD/MM/YYYY
+  amount: string; // Base amount excluding GST
+  gst: string; // GST amount
+  totalAmount?: string; // Gross amount including GST
   documentType: string;
   expensesDescription: string;
   rawText?: string;
 }
 
-export interface UploadedFile {
-  id: string;
-  filename: string;
-  mimeType: string;
-  size: number;
-  dataUrl: string; // base64 data URL for preview / Gemini
-  extracted?: ExtractedInvoice;
-  extractError?: string;
-  status: 'queued' | 'extracting' | 'done' | 'error';
-}
-
-/**
- * The set of allowed Expense Heads. Extend as needed.
- */
 export const EXPENSE_HEADS = [
-  'Rent',
-  'Electricity',
-  'Water',
+  'BMW Bills', // Bio-Medical Waste
+  'Barcoding Bills', // Barcode labels & scanning
+  'Housekeeping & Sanitization',
+  'Security Services',
+  'Rent & Maintenance',
+  'Courier & Logistics',
+  'Electricity & Utilities',
+  'Equipment Maintenance / AMC',
+  'Printing & Stationery',
   'Internet & Telecom',
-  'Housekeeping',
-  'Security',
-  'Manpower & Staffing',
-  'Equipment Maintenance',
-  'AMC / CMC',
-  'Consumables',
-  'Stationery & Printing',
-  'Travel & Conveyance',
-  'Professional Fees',
-  'Repairs & Maintenance',
-  'Waste Management',
-  'Pantry & Refreshments',
-  'Insurance',
-  'Statutory & Compliance',
-  'Transportation',
+  'Diagnostic Consumables',
   'Other',
 ] as const;
 
@@ -147,31 +35,22 @@ export type ExpenseHead = (typeof EXPENSE_HEADS)[number];
 
 export const DOCUMENT_TYPES = [
   'Tax Invoice',
-  'Proforma Invoice',
   'Bill of Supply',
   'Credit Note',
   'Debit Note',
-  'Receipt',
+  'Proforma Invoice',
+  'Delivery Challan',
+  'Receipt / Cash Voucher',
 ] as const;
 
-// ────────────────────────────────────────────────────────────────────────────
-// MASTER SITE DATA — stored in the SitesList tab of the same Google Sheet
-// ────────────────────────────────────────────────────────────────────────────
+export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
-/**
- * Master Site Data row. Matches the 17 columns defined in the user spec
- * section A. Column order MUST match the SitesList tab's header row.
- *
- * NOTE: PII fields (address, vendorEmail, vendorMobile) are stored as plain
- * text in Google Sheets — the sheet's share permissions are the access
- * control. If you need encrypted-at-rest PII, use MongoDB instead.
- */
 export interface MasterSite {
-  entity: string; // 1MGH / 1MGT / 1LFS
-  status: string; // Site active status
-  type: string; // LAB, PAC, Retail-CC, OHC, FC, HP, Med Affairs
-  tag: string; // Site name
-  region: string; // East / West / North / South
+  entity: string;
+  status: string;
+  type: string;
+  tag: string;
+  region: string;
   state: string;
   address: string;
   vendorCode: string;
@@ -179,39 +58,14 @@ export interface MasterSite {
   vendorEmail: string;
   vendorMobile: string;
   costCenter: string;
-  hanaName: string; // Cost Center Description (HANA Name)
+  hanaName: string;
   businessAreaCode: string;
   taxCode: string;
   frequency: string;
   remarks: string;
 }
 
-/**
- * Column order in the SitesList tab. MUST match the sheet header row.
- * If your sheet has a different column order, edit this array.
- */
-export const SITE_SHEET_COLUMN_ORDER: readonly (keyof MasterSite)[] = [
-  'entity',
-  'status',
-  'type',
-  'tag',
-  'region',
-  'state',
-  'address',
-  'vendorCode',
-  'vendorName',
-  'vendorEmail',
-  'vendorMobile',
-  'costCenter',
-  'hanaName',
-  'businessAreaCode',
-  'taxCode',
-  'frequency',
-  'remarks',
-];
-
-/** Header labels as they appear in row 1 of the SitesList tab. */
-export const SITE_SHEET_HEADERS: readonly string[] = [
+export const SITE_SHEET_COLUMN_ORDER = [
   'Entity',
   'Status',
   'Type',
@@ -229,4 +83,32 @@ export const SITE_SHEET_HEADERS: readonly string[] = [
   'Tax Code',
   'Frequency',
   'Remarks',
-];
+] as const;
+
+export interface InvoiceRow {
+  FY: string;
+  Month: string;
+  '4D Print': string;
+  'Legal Entity': string;
+  'Cost Center Description (HANA Name)': string;
+  'Cost Center Code': string;
+  'Expenses Head': string;
+  'Expenses Description': string;
+  'Vendor Code': string;
+  'Vendor Name': string;
+  'Invoice / PO No.': string;
+  Amount: string;
+  GST: string;
+  'Amount (inclusive of GST)': string;
+  'Email address of inputer': string;
+  PO: string;
+  SES: string;
+  'SES Date': string;
+  'SES Remarks': string;
+  'Mail Status': string;
+  'Mail Sent On': string;
+  SIte: string;
+  'Document Type': string;
+  'Payment Date': string;
+  'UTR Details': string;
+}

@@ -126,3 +126,6 @@ The FY and Month folders are created on demand. If a file with the same name alr
 - Username: `admin`
 - Password: `Admin@123` (set via `ADMIN_PASSWORD_PLAIN` in `.env.local`)
 - **Change these immediately** by running `bun run scripts/hash-password.ts "<new-password>"` and setting `ADMIN_PASSWORD_HASH` in your Vercel env dashboard (remove `ADMIN_PASSWORD_PLAIN` in production).
+
+
+

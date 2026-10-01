@@ -13,3 +13,6 @@ export async function GET() {
     user: { username: session.sub, role: session.role },
   });
 }
+
+
+
